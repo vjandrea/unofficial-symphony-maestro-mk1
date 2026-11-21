@@ -56,6 +56,15 @@ struct EnsembleProtocolTests {
         #expect(a.master == 0)  // capped
     }
 
+    @Test func clockSourceFrames() {
+        // Frames the unit answered on 2026-11-21 (firmware BCD 1.9.30).
+        #expect(EnsembleClockSource.readFrame == Self.hex("01 FF 1A FF FF FE 60 05"))
+        #expect(EnsembleClockSource.internal.setFrame == Self.hex("00 FF 1A 0F 60 05 60 05"))  // accepted (09)
+        #expect(EnsembleClockSource.wordClock.setFrame == Self.hex("00 FF 1A 0F FF 86 60 05"))
+        #expect(EnsembleClockSource(statusReply: Self.hex("0C FF 1A 10 60 05 60 05")) == .internal)
+        #expect(EnsembleClockSource(statusReply: Self.hex("0C FF 1A 30 FF FE 60 07")) == nil)  // no connection
+    }
+
     @Test func rejectsOutOfRangeArguments() {
         #expect(throws: EnsembleError.self) { try EnsembleProtocol.setMicGain(input: 0, dB: 76) }
         #expect(throws: EnsembleError.self) { try EnsembleProtocol.setMicGain(input: 0, dB: 9) }

@@ -72,16 +72,21 @@ public actor ASFWControlPlane {
     }
 
     private func send(_ frame: [UInt8], to unit: Unit, generation: Int) async throws -> [UInt8] {
+        // STATUS goes through ASFW's read-only tool; everything else needs the developer
+        // tool, which checks the declared intent against the ctype and opcode.
+        let isStatus = frame.first == 0x01
+        let intent = isStatus ? "status" : (frame.count > 2 && frame[2] == 0x00 ? "vendorDependent" : "control")
         let args: [String: Any] = [
             "targetGuid": String(format: "0x%016llX", unit.guid),
             "nodeId": unit.nodeId,
             "generation": generation,
             "addressHigh": 0xFFFF,
             "addressLow": 0xF000_0B00,
-            "intent": "vendorDependent",
+            "intent": intent,
             "payload": frame.map(Int.init),
         ]
-        let result = try await request("tools/call", ["name": "asfw_fcp_send_command_dev", "arguments": args])
+        let tool = isStatus ? "asfw_fcp_send_command" : "asfw_fcp_send_command_dev"
+        let result = try await request("tools/call", ["name": tool, "arguments": args])
         let structured = result["structuredContent"] as? [String: Any] ?? [:]
         let data = structured["data"] as? [String: Any] ?? [:]
         guard structured["ok"] as? Bool == true, data["status"] as? String == "ok",

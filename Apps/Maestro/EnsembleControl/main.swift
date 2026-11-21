@@ -25,6 +25,8 @@ if CommandLine.arguments.contains("--probe") {
         print("mic gain \(s.micGain) dB, phantom \(s.phantom), main -\(s.mainAttenuation) dB, HP -\(s.headphone1Attenuation)/-\(s.headphone2Attenuation) dB")
         let m = try EnsembleMeters(reply: try await plane.send(EnsembleProtocol.readMeters, to: unit))
         print("meters in \(m.inputs) main \(m.main) out \(m.outputs)")
+        let clockReply = try await plane.send(EnsembleClockSource.readFrame, to: unit)
+        print("clock \(EnsembleClockSource(statusReply: clockReply)?.label ?? "unknown") (\(clockReply.map { String(format: "%02X", $0) }.joined(separator: " ")))")
         exit(0)
     } catch {
         print("probe failed: \(error)")
@@ -42,6 +44,7 @@ final class EnsembleModel {
     var meters: EnsembleMeters?
     var mixers: [EnsembleMixer]?
     var routing: EnsembleRouting?
+    var clock: EnsembleClockSource?
 
     /// Edit one mixer locally and queue the write of both (the unit only takes both).
     func editMixer(_ index: Int, _ change: (inout EnsembleMixer) -> Void) {
@@ -76,6 +79,7 @@ final class EnsembleModel {
         settings = try EnsembleSettings(reply: try await plane.send(EnsembleProtocol.readSettings, to: unit))
         routing = try EnsembleRouting(reply: try await plane.send(EnsembleProtocol.readRouting, to: unit))
         mixers = try EnsembleMixer.parse(reply: try await plane.send(EnsembleProtocol.readMixers, to: unit))
+        clock = EnsembleClockSource(statusReply: try await plane.send(EnsembleClockSource.readFrame, to: unit))
     }
 
     /// One loop owns the bus: writes first, then a meter poll every ~120 ms.
@@ -94,8 +98,10 @@ final class EnsembleModel {
                     while let frame = pending.first {
                         let reply = try await plane.send(frame, to: unit)
                         pending.removeFirst()
-                        do { _ = try EnsembleProtocol.payload(of: reply, opcode: frame[6]) }
-                        catch { status = String(format: "Unit rejected opcode %02X: \(error)", frame[6]) }
+                        if reply.first != EnsembleProtocol.accepted {
+                            status = String(format: "Unit rejected %@ (response %02X)",
+                                            frame.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " "), reply.first ?? 0)
+                        }
                     }
                     if pending.isEmpty { try await readState(unit) }  // skip while more edits are queued (fader drags)
                 }
@@ -265,6 +271,12 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Picker("Clock", selection: Binding(
+                    get: { model.clock ?? .internal },
+                    set: { source in model.send(source.setFrame); model.clock = source })) {
+                    ForEach(EnsembleClockSource.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .frame(width: 200)
                 Toggle("Identify", isOn: Binding(
                     get: { model.settings?.identify ?? false },
                     set: { on in model.send(EnsembleProtocol.setIdentify(on)) { $0.identify = on } }))

@@ -286,3 +286,40 @@ public struct EnsembleMixer: Sendable, Equatable {
     // ponytail: capped at 0 dB until the unit's maximum is known.
     private static func byte(_ dB: Int) -> UInt8 { UInt8(bitPattern: Int8(min(max(dB, off), 0))) }
 }
+
+/// Sample clock source, set with the standard AV/C SIGNAL SOURCE command (not
+/// an Apogee vendor command) on the music subunit's sync input. On firmware BCD
+/// 1.9.30 that is destination plug 5 ("MSU Synch Input", BridgeCo plug type 3);
+/// ALSA's driver uses plug 7, which this firmware rejects. External sources are
+/// unit plugs 4-6 ("Ext SPDIF Input", "Ext Optical Input", "Ext WClock Input").
+public enum EnsembleClockSource: Sendable, CaseIterable {
+    case `internal`, spdifCoax, optical, wordClock
+
+    static let syncInput: [UInt8] = [0x60, 0x05]
+
+    var address: [UInt8] {
+        switch self {
+        case .internal: [0x60, 0x05]   // "MSU Synch Output"
+        case .spdifCoax: [0xFF, 0x84]
+        case .optical: [0xFF, 0x85]
+        case .wordClock: [0xFF, 0x86]
+        }
+    }
+
+    public var label: String {
+        switch self { case .internal: "Internal"; case .spdifCoax: "S/PDIF coax"; case .optical: "Optical"; case .wordClock: "Word clock" }
+    }
+
+    /// STATUS: which source drives the sync input. Unpadded, ctype STATUS.
+    public static let readFrame: [UInt8] = [0x01, 0xFF, 0x1A, 0xFF, 0xFF, 0xFE] + syncInput
+
+    /// CONTROL: connect `self` to the sync input. Operand 0 is 0x0F (CCM Figure 7.1).
+    public var setFrame: [UInt8] { [0x00, 0xFF, 0x1A, 0x0F] + address + Self.syncInput }
+
+    /// Parses a STABLE (0x0C) STATUS reply; nil for an unknown source.
+    public init?(statusReply r: [UInt8]) {
+        guard r.count >= 8, r[0] == 0x0C, r[2] == 0x1A,
+              let match = Self.allCases.first(where: { $0.address == Array(r[4...5]) }) else { return nil }
+        self = match
+    }
+}
