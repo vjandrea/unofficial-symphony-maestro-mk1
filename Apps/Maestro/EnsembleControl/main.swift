@@ -123,11 +123,12 @@ final class EnsembleModel {
 // MARK: - Views
 
 /// Vertical fader drawn by hand: a rotated `Slider` doesn't render on macOS.
-/// Calls `onEditingChanged(false)` once when the drag ends.
+/// `onCommit` runs when a drag ends with a different value; a plain click sends nothing.
 struct VerticalFader: View {
     @Binding var value: Double
     let range: ClosedRange<Double>
     var onEditingChanged: (Bool) -> Void = { _ in }
+    var onCommit: () -> Void = {}
     @State private var dragging = false
     @State private var start: Double = 0
 
@@ -150,7 +151,11 @@ struct VerticalFader: View {
                     let delta = -drag.translation.height / h * (range.upperBound - range.lowerBound)
                     value = min(max((start + delta).rounded(), range.lowerBound), range.upperBound)
                 }
-                .onEnded { _ in dragging = false; onEditingChanged(false) })
+                .onEnded { _ in
+                    dragging = false
+                    onEditingChanged(false)
+                    if value != start { onCommit() }
+                })
         }
     }
 }
@@ -182,7 +187,7 @@ struct MicStrip: View {
         VStack(spacing: 8) {
             Text("In \(input + 1)").font(.headline)
             HStack(alignment: .bottom) {
-                VerticalFader(value: $gain, range: 10...75) { editing = $0; if !$0 { commit() } }
+                VerticalFader(value: $gain, range: 10...75, onEditingChanged: { editing = $0 }, onCommit: commit)
                     .frame(width: 30, height: 90)
                 MeterBar(value: model.meters?.inputs[input] ?? 0)
             }
@@ -215,8 +220,8 @@ struct LevelControl: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            VerticalFader(value: $level, range: -127...0) { editing = $0
-                if !$0 { model.send(EnsembleProtocol.setOutputLevel(output, attenuationDB: Int(-level))) }
+            VerticalFader(value: $level, range: -127...0, onEditingChanged: { editing = $0 }) {
+                model.send(EnsembleProtocol.setOutputLevel(output, attenuationDB: Int(-level)))
             }
             .frame(width: 34, height: 140)
             Text("\(Int(level)) dB").font(.caption2).monospacedDigit()
@@ -317,7 +322,7 @@ struct MixerFader: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            VerticalFader(value: $dB, range: -97...0) { editing = $0; if !$0 { commit(Int(dB)) } }
+            VerticalFader(value: $dB, range: -97...0, onEditingChanged: { editing = $0 }) { commit(Int(dB)) }
                 .frame(width: 34, height: 140)
             Text(dB <= -97 ? "-∞" : "\(Int(dB))").font(.caption2).monospacedDigit()
             Text(label).font(.caption2).lineLimit(1).fixedSize()
