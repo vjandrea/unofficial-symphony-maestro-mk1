@@ -78,6 +78,36 @@ public enum EnsembleProtocol {
 
     public static func setIdentify(_ on: Bool) -> [UInt8] { frame(0xEB, [0x08, on ? 1 : 0]) }
 
+    /// `E8 <ch> <isInput> <level>`. Mic is only valid on inputs 1-4.
+    public static func setReferenceLevel(output: Int, _ level: EnsembleReferenceLevel) throws -> [UInt8] {
+        guard (0..<8).contains(output), level != .mic else { throw EnsembleError.outOfRange("output \(output + 1) \(level)") }
+        return frame(0xE8, [UInt8(output), 0, level.rawValue])
+    }
+
+    public static func setReferenceLevel(input: Int, _ level: EnsembleReferenceLevel) throws -> [UInt8] {
+        guard (0..<8).contains(input), level != .mic || input < micChannels else { throw EnsembleError.outOfRange("input \(input + 1) \(level)") }
+        return frame(0xE8, [UInt8(input), 1, level.rawValue])
+    }
+
+    /// `EF <destination> <source>`: one routing-table entry (indices in `EnsembleRouting`).
+    public static func setRoute(destination: UInt8, source: UInt8) throws -> [UInt8] {
+        guard destination < EnsembleRouting.count, source <= EnsembleRouting.none else {
+            throw EnsembleError.outOfRange("route \(destination) <- \(source)")
+        }
+        return frame(0xEF, [destination, source])
+    }
+
+    /// `B7 01` + both mixer blocks. The daemon byte-swaps every 32-bit word of the
+    /// 100-byte payload before sending (`_OSSwapInt32` × 25); confirmed on hardware.
+    public static func writeMixers(_ a: EnsembleMixer, _ b: EnsembleMixer) -> [UInt8] {
+        let blocks = a.bytes + b.bytes
+        let swapped = stride(from: 0, to: blocks.count, by: 4).flatMap { blocks[$0..<$0 + 4].reversed() }
+        return frame(0xB7, [0x01] + swapped)
+    }
+
+    /// `F4 <channels>`: how many outputs (from output 1) the main level drives.
+    public static func setMainOutputMode(_ mode: EnsembleMainOutputMode) -> [UInt8] { frame(0xF4, [mode.rawValue]) }
+
     private static func micChannel(_ input: Int) throws -> UInt8 {
         guard (0..<micChannels).contains(input) else { throw EnsembleError.outOfRange("mic input \(input + 1)") }
         return UInt8(input)
@@ -87,6 +117,27 @@ public enum EnsembleProtocol {
 /// `F6` output index. HP1/HP2 come from `setOutLevel(bool, bool, int)`.
 public enum EnsembleOutput: UInt8, Sendable, CaseIterable {
     case main = 0, headphone1 = 1, headphone2 = 2
+}
+
+/// Device reference-level codes. Maestro's CoreAudio encoding is +4 dBu = 0,
+/// -10 dBV = 1, Mic = 3 (`InputChannelState.swift`); the daemon passes 0/1
+/// through and turns 3 into 2. Inferred from that mapping, not measured.
+public enum EnsembleReferenceLevel: UInt8, Sendable, CaseIterable {
+    case plus4dBu = 0, minus10dBV = 1, mic = 2
+
+    public var label: String {
+        switch self { case .plus4dBu: "+4 dBu"; case .minus10dBV: "-10 dBV"; case .mic: "Mic" }
+    }
+}
+
+/// Main output mode = number of outputs the main level drives (`EA` R+0x37).
+/// ponytail: 0 is left out until its behaviour is known; it may leave outputs 1-2 unattenuated.
+public enum EnsembleMainOutputMode: UInt8, Sendable, CaseIterable {
+    case stereo = 2, surround51 = 6, surround71 = 8
+
+    public var label: String {
+        switch self { case .stereo: "Stereo (1-2)"; case .surround51: "5.1 (1-6)"; case .surround71: "7.1 (1-8)" }
+    }
 }
 
 public enum EnsembleError: Error, Sendable, Equatable {
@@ -179,4 +230,59 @@ public struct EnsembleMeters: Sendable, Equatable {
         guard value > 0 else { return -.infinity }
         return max(20 * log10(Double(value) / 256), -48)
     }
+}
+
+/// `B5` reply: the source index feeding each of 40 destinations.
+public struct EnsembleRouting: Sendable, Equatable {
+    public static let count: UInt8 = 40
+    public static let none: UInt8 = 0x28
+    // Source indices (ensembleController::debugPrintRouting).
+    public static func playback(_ n: Int) -> UInt8 { UInt8(0x08 + n) }   // FireWire Playback n+1
+    public static let mixA: UInt8 = 0x24, mixB: UInt8 = 0x26              // L; R is +1
+    // Destination indices.
+    public static func analogOut(_ n: Int) -> UInt8 { UInt8(n) }
+    public static let headphone1: UInt8 = 36, headphone2: UInt8 = 38     // L; R is +1
+
+    public var sources: [UInt8]
+
+    public init(reply: [UInt8]) throws {
+        let r = Array(try EnsembleProtocol.payload(of: reply, opcode: 0xB5))
+        guard r.count >= Int(Self.count) else { throw EnsembleError.shortReply(reply.count) }
+        sources = Array(r.prefix(Int(Self.count)))
+    }
+}
+
+/// One internal mixer (Mix A or B), kept as its 50 raw bytes so fields not yet
+/// understood (mute/solo bits, flags) are written back unchanged.
+public struct EnsembleMixer: Sendable, Equatable {
+    public static let length = 50
+    /// Fader value the unit uses for -∞.
+    public static let off = -97
+    public var bytes: [UInt8]
+
+    /// `B7 00` reply → Mix A, Mix B.
+    public static func parse(reply: [UInt8]) throws -> [EnsembleMixer] {
+        let r = Array(try EnsembleProtocol.payload(of: reply, opcode: 0xB7))
+        guard r.count >= 2 * length else { throw EnsembleError.shortReply(reply.count) }
+        return try [0, length].map { start in
+            let block = Array(r[start..<start + length])
+            guard block[0] == 0x7B else { throw EnsembleError.unexpectedReply }
+            return EnsembleMixer(bytes: block)
+        }
+    }
+
+    /// 18 source faders, signed dB. Order inferred as Analog In 1-8, S/PDIF L/R, Optical In 1-8.
+    public func fader(_ i: Int) -> Int { Int(Int8(bitPattern: bytes[5 + i])) }
+    public mutating func setFader(_ i: Int, dB: Int) { bytes[5 + i] = Self.byte(dB) }
+
+    /// Software return (FireWire playback pair) fader, L and R together.
+    public var softwareReturn: Int { Int(Int8(bitPattern: bytes[0x2E])) }
+    public mutating func setSoftwareReturn(dB: Int) { bytes[0x2E] = Self.byte(dB); bytes[0x2F] = Self.byte(dB) }
+
+    /// Mixer master, L and R together.
+    public var master: Int { Int(Int8(bitPattern: bytes[0x30])) }
+    public mutating func setMaster(dB: Int) { bytes[0x30] = Self.byte(dB); bytes[0x31] = Self.byte(dB) }
+
+    // ponytail: capped at 0 dB until the unit's maximum is known.
+    private static func byte(_ dB: Int) -> UInt8 { UInt8(bitPattern: Int8(min(max(dB, off), 0))) }
 }
