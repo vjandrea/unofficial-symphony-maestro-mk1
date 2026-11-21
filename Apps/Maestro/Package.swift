@@ -66,6 +66,13 @@ let package = Package(
             ]
         ),
 
+        // MARK: - Ensemble (FireWire) test app, via ASFireWire's control plane
+        .executableTarget(
+            name: "EnsembleControl",
+            dependencies: ["MaestroDevice"],
+            path: "EnsembleControl"
+        ),
+
         // MARK: - Tests
         .testTarget(
             name: "MaestroCoreTests",
