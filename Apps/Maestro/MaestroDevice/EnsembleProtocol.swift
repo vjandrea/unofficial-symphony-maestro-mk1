@@ -71,9 +71,9 @@ public enum EnsembleProtocol {
         return frame(0xE4, [UInt8(input), on ? 1 : 0])
     }
 
-    /// Output levels are dB of attenuation, 0...127 (the daemon clamps the same way).
+    /// Output levels are dB of attenuation: main 0...127, headphones 0...64 (63 and up mutes).
     public static func setOutputLevel(_ output: EnsembleOutput, attenuationDB: Int) -> [UInt8] {
-        frame(0xF6, [output.rawValue, UInt8(min(max(attenuationDB, 0), 127))])
+        frame(0xF6, [output.rawValue, UInt8(min(max(attenuationDB, 0), output.maxAttenuation))])
     }
 
     public static func setIdentify(_ on: Bool) -> [UInt8] { frame(0xEB, [0x08, on ? 1 : 0]) }
@@ -117,6 +117,7 @@ public enum EnsembleProtocol {
 /// `F6` output index. HP1/HP2 come from `setOutLevel(bool, bool, int)`.
 public enum EnsembleOutput: UInt8, Sendable, CaseIterable {
     case main = 0, headphone1 = 1, headphone2 = 2
+    public var maxAttenuation: Int { self == .main ? 127 : 64 }
 }
 
 /// Device reference-level codes. Maestro's CoreAudio encoding is +4 dBu = 0,
@@ -215,14 +216,14 @@ public struct EnsembleMeters: Sendable, Equatable {
     /// Analog inputs 1-8 (not yet confirmed with an input signal).
     public var inputs: [UInt8]
     /// Main L/R (tracked outputs 1-2 in testing).
-    public var main: [UInt8]
+    public var softwareReturn: [UInt8]   // playback pair meters, not the main bus
     /// Analog outputs 1-8 (confirmed).
     public var outputs: [UInt8]
 
     public init(reply: [UInt8]) throws {
         front = try EnsembleFrontPanel(reply: reply, opcode: 0xFF)
         guard reply.count >= 0x33 else { throw EnsembleError.shortReply(reply.count) }
-        inputs = Array(reply[0x14..<0x1C]); main = Array(reply[0x26..<0x28]); outputs = Array(reply[0x2B..<0x33])
+        inputs = Array(reply[0x14..<0x1C]); softwareReturn = Array(reply[0x26..<0x28]); outputs = Array(reply[0x2B..<0x33])
     }
 
     /// Meter byte → dBFS, as the daemon computed it (20·log10(v/256), floor -48).

@@ -24,7 +24,7 @@ if CommandLine.arguments.contains("--probe") {
         let s = try EnsembleSettings(reply: try await plane.send(EnsembleProtocol.readSettings, to: unit))
         print("mic gain \(s.micGain) dB, phantom \(s.phantom), main -\(s.mainAttenuation) dB, HP -\(s.headphone1Attenuation)/-\(s.headphone2Attenuation) dB")
         let m = try EnsembleMeters(reply: try await plane.send(EnsembleProtocol.readMeters, to: unit))
-        print("meters in \(m.inputs) main \(m.main) out \(m.outputs)")
+        print("meters in \(m.inputs) sw return \(m.softwareReturn) out \(m.outputs)")
         let clockReply = try await plane.send(EnsembleClockSource.readFrame, to: unit)
         print("clock \(EnsembleClockSource(statusReply: clockReply)?.label ?? "unknown") (\(clockReply.map { String(format: "%02X", $0) }.joined(separator: " ")))")
         exit(0)
@@ -46,13 +46,16 @@ final class EnsembleModel {
     var routing: EnsembleRouting?
     var clock: EnsembleClockSource?
 
-    /// Edit one mixer locally and queue the write of both (the unit only takes both).
+    /// Edit one mixer locally. `B7 01` stores to the unit's flash on every call, so both
+    /// mixers go out in one write, 5 s after the last edit.
     func editMixer(_ index: Int, _ change: (inout EnsembleMixer) -> Void) {
         guard var m = mixers else { return }
         change(&m[index])
         mixers = m
-        pending.append(EnsembleProtocol.writeMixers(m[0], m[1]))
+        mixerEditedAt = .now
     }
+    private var mixerEditedAt: ContinuousClock.Instant?
+    private static let mixerWriteDelay = Duration.seconds(5)
 
     /// Point an L/R destination pair at an L/R source pair.
     func route(destinationL: UInt8, sourceL: UInt8) {
@@ -78,7 +81,8 @@ final class EnsembleModel {
     private func readState(_ unit: ASFWControlPlane.Unit) async throws {
         settings = try EnsembleSettings(reply: try await plane.send(EnsembleProtocol.readSettings, to: unit))
         routing = try EnsembleRouting(reply: try await plane.send(EnsembleProtocol.readRouting, to: unit))
-        mixers = try EnsembleMixer.parse(reply: try await plane.send(EnsembleProtocol.readMixers, to: unit))
+        let unitMixers = try EnsembleMixer.parse(reply: try await plane.send(EnsembleProtocol.readMixers, to: unit))
+        if mixerEditedAt == nil { mixers = unitMixers }  // keep local edits until they're written
         clock = EnsembleClockSource(statusReply: try await plane.send(EnsembleClockSource.readFrame, to: unit))
     }
 
@@ -93,6 +97,10 @@ final class EnsembleModel {
                     status = "Connected"
                 }
                 guard let unit else { continue }
+                if let t = mixerEditedAt, ContinuousClock.now - t >= Self.mixerWriteDelay, let m = mixers {
+                    mixerEditedAt = nil
+                    pending.append(EnsembleProtocol.writeMixers(m[0], m[1]))
+                }
                 if !pending.isEmpty {
                     // Drop a write only once the unit has accepted it, so a transport hiccup retries it.
                     while let frame = pending.first {
@@ -226,15 +234,15 @@ struct LevelControl: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            VerticalFader(value: $level, range: -127...0, onEditingChanged: { editing = $0 }) {
+            VerticalFader(value: $level, range: -Double(output.maxAttenuation)...0, onEditingChanged: { editing = $0 }) {
                 model.send(EnsembleProtocol.setOutputLevel(output, attenuationDB: Int(-level)))
             }
             .frame(width: 34, height: 140)
             Text("\(Int(level)) dB").font(.caption2).monospacedDigit()
             Text(label).font(.caption2).lineLimit(1).fixedSize()
         }
-        .onChange(of: attenuation) { _, new in if !editing, let new { level = Double(-new) } }
-        .onAppear { if let attenuation { level = Double(-attenuation) } }
+        .onChange(of: attenuation) { _, new in if !editing, let new { level = Double(-min(new, output.maxAttenuation)) } }
+        .onAppear { if let attenuation { level = Double(-min(attenuation, output.maxAttenuation)) } }
     }
 }
 
@@ -308,7 +316,7 @@ struct ContentView: View {
                     .pickerStyle(.segmented)
                     HStack(alignment: .bottom, spacing: 6) {
                         LevelControl(output: .main, label: "Main", attenuation: model.settings?.mainAttenuation, model: model)
-                        ForEach(0..<2, id: \.self) { i in VStack { MeterBar(value: model.meters?.main[i] ?? 0); Text(i == 0 ? "M L" : "M R").font(.caption2) } }
+                        ForEach(0..<2, id: \.self) { i in VStack { MeterBar(value: model.meters?.softwareReturn[i] ?? 0); Text(i == 0 ? "SW L" : "SW R").font(.caption2) } }
                         LevelControl(output: .headphone1, label: "HP 1", attenuation: model.settings?.headphone1Attenuation, model: model)
                         LevelControl(output: .headphone2, label: "HP 2", attenuation: model.settings?.headphone2Attenuation, model: model)
                         Divider().frame(height: 90)

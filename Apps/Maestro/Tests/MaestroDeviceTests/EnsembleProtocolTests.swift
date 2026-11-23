@@ -18,6 +18,7 @@ struct EnsembleProtocolTests {
         #expect(Array(try EnsembleProtocol.setMicGain(input: 0, dB: 39).prefix(9)) == Self.hex("00 FF 00 00 03 DB E6 00 27"))
         #expect(Array(EnsembleProtocol.setIdentify(true).prefix(9)) == Self.hex("00 FF 00 00 03 DB EB 08 01"))
         #expect(Array(EnsembleProtocol.setOutputLevel(.main, attenuationDB: 200).prefix(9)) == Self.hex("00 FF 00 00 03 DB F6 00 7F"))
+        #expect(Array(EnsembleProtocol.setOutputLevel(.headphone1, attenuationDB: 100).prefix(9)) == Self.hex("00 FF 00 00 03 DB F6 01 40"))
     }
 
     @Test func referenceLevelAndMainModeFrames() throws {
@@ -99,7 +100,7 @@ struct EnsembleProtocolTests {
         let m = try EnsembleMeters(reply: Self.ff01)
         #expect(m.front == f)
         #expect(m.outputs == [0xF8, 0xF7, 0xF8, 0xF7, 0, 0, 0, 0])
-        #expect(m.main == [0xF8, 0xF7] && m.inputs.allSatisfy { $0 == 0 })
+        #expect(m.softwareReturn == [0xF8, 0xF7] && m.inputs.allSatisfy { $0 == 0 })
         #expect(abs(EnsembleMeters.dBFS(248) - -0.276) < 0.01)
         #expect(EnsembleMeters.dBFS(1) == -48)
     }
