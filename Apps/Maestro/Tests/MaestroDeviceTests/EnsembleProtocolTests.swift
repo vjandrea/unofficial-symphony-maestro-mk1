@@ -104,4 +104,39 @@ struct EnsembleProtocolTests {
         #expect(abs(EnsembleMeters.dBFS(248) - -0.276) < 0.01)
         #expect(EnsembleMeters.dBFS(1) == -48)
     }
+
+    @Test func coefficientsFromModel() throws {
+        var bytes = [UInt8](repeating: 0, count: EnsembleMixer.length)
+        bytes[0] = 0x7B; bytes[2] = 1                     // software return = playback 1/2
+        for i in 5..<23 { bytes[i] = UInt8(bitPattern: -97) }  // inputs off
+        bytes[5] = 0                                      // input 1 at 0 dB, centre
+        bytes[6] = 0; bytes[29] = 64                      // input 2 at 0 dB, hard right
+        bytes[23] = 0b0100                                // ...but input 2 muted
+        bytes[46] = 0; bytes[47] = UInt8(bitPattern: -6)  // software return L 0 dB, R -6 dB
+        bytes[48] = 0; bytes[49] = 0                      // output faders 0 dB
+        let c = EnsembleCoefficients(model: EnsembleMixer(bytes: bytes))
+        #expect(c.left[0] == 11585 && c.right[0] == 11585)      // -3 dB each side
+        #expect(c.left[1] == 0 && c.right[1] == 0)
+        #expect(c.left[8] == 0x4000 && c.right[9] == 8211)
+        #expect(c.left[26] == 0 && c.right[35] == 0)
+
+        bytes[24] = 0b10                                  // solo input 5: everything else drops
+        bytes[9] = 0
+        let solo = EnsembleCoefficients(model: EnsembleMixer(bytes: bytes))
+        #expect(solo.left[4] == 11585 && solo.left[0] == 0 && solo.left[8] == 0)
+    }
+
+    @Test func coefficientBlocksRoundTrip() throws {
+        var c = EnsembleCoefficients()
+        c.left[9] = 0x4000; c.right[9] = 0x1234; c.right[35] = 0xFFFF
+        let frames = c.writeFrames(mixer: 1)
+        #expect(frames.map { $0[6] } == [0xB0, 0xB1, 0xB2, 0xB3] && frames.allSatisfy { $0[7] == 1 })
+        #expect(Array(frames[1][8..<12]) == [0x00, 0x40, 0x34, 0x12])
+        var back = EnsembleCoefficients()
+        for (b, f) in frames.enumerated() {
+            let reply = [EnsembleProtocol.accepted] + Array(f[1..<6]) + [0xB6] + Array(f[8..<44])
+            try back.absorb(reply: reply, block: b)
+        }
+        #expect(back == c)
+    }
 }

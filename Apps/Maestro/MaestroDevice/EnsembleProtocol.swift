@@ -276,6 +276,9 @@ public struct EnsembleMixer: Sendable, Equatable {
     public func fader(_ i: Int) -> Int { Int(Int8(bitPattern: bytes[5 + i])) }
     public mutating func setFader(_ i: Int, dB: Int) { bytes[5 + i] = Self.byte(dB) }
 
+    /// Routing source number of mixer input `i` (Analog 1-8, S/PDIF L/R, Optical 1-8).
+    public static func source(ofInput i: Int) -> Int { i < 8 ? i : 18 + i }
+
     /// Software return (FireWire playback pair) fader, L and R together.
     public var softwareReturn: Int { Int(Int8(bitPattern: bytes[0x2E])) }
     public mutating func setSoftwareReturn(dB: Int) { bytes[0x2E] = Self.byte(dB); bytes[0x2F] = Self.byte(dB) }
@@ -286,6 +289,75 @@ public struct EnsembleMixer: Sendable, Equatable {
 
     // ponytail: capped at 0 dB until the unit's maximum is known.
     private static func byte(_ dB: Int) -> UInt8 { UInt8(bitPattern: Int8(min(max(dB, off), 0))) }
+}
+
+/// Mixer gains as the DSP applies them: for each mixer, 36 sources (numbered as
+/// routing sources 0-35) into its L and R, 16-bit linear, 0x4000 = unity.
+/// Written in four 9-source blocks (`B0`...`B3 <mixer>` + 36 bytes) and read back
+/// with `B6 <mixer> <block>`. These change the audio; the `B7` model doesn't.
+public struct EnsembleCoefficients: Sendable, Equatable {
+    public static let sources = 36, perBlock = 9, blocks = 4
+    public static let unity = 0x4000
+    public var left = [UInt16](repeating: 0, count: sources)
+    public var right = [UInt16](repeating: 0, count: sources)
+
+    public init() {}
+
+    public static func readFrame(mixer: Int, block: Int) -> [UInt8] {
+        EnsembleProtocol.frame(0xB6, [UInt8(mixer), UInt8(block)])
+    }
+
+    /// One block on the wire: per source one quadlet, R in the high half and L in
+    /// the low half, little-endian (the same byte-swapped quadlets as `B7 01`).
+    // ponytail: layout unconfirmed on hardware; check it with `--coefficients` before enabling writes.
+    func block(_ b: Int) -> [UInt8] {
+        (b * Self.perBlock..<(b + 1) * Self.perBlock).flatMap { i -> [UInt8] in
+            let q = UInt32(right[i]) << 16 | UInt32(left[i])
+            return withUnsafeBytes(of: q.littleEndian, Array.init)
+        }
+    }
+
+    public func writeFrames(mixer: Int) -> [[UInt8]] {
+        (0..<Self.blocks).map { EnsembleProtocol.frame(0xB0 + UInt8($0), [UInt8(mixer)] + block($0)) }
+    }
+
+    /// Fills one block from a `B6` reply (data assumed at the start of the payload).
+    public mutating func absorb(reply: [UInt8], block b: Int) throws {
+        let r = Array(try EnsembleProtocol.payload(of: reply, opcode: 0xB6))
+        guard r.count >= 4 * Self.perBlock else { throw EnsembleError.shortReply(reply.count) }
+        for j in 0..<Self.perBlock {
+            left[b * Self.perBlock + j] = UInt16(r[4 * j]) | UInt16(r[4 * j + 1]) << 8
+            right[b * Self.perBlock + j] = UInt16(r[4 * j + 2]) | UInt16(r[4 * j + 3]) << 8
+        }
+    }
+
+    /// Gains for a `B7` model: fader x pan x output fader, with mute and solo folded in.
+    public init(model m: EnsembleMixer) {
+        let b = m.bytes
+        func bit(_ n: Int) -> Bool { b[23 + n / 8] & (1 << (n % 8)) != 0 }
+        // Inputs 0-17: mute bit 2i, solo bit 2i+1. Software return: bits 36 (mute), 37 (solo).
+        let anySolo = (0..<19).contains { bit(2 * $0 + 1) }
+        func audible(_ i: Int) -> Bool { !bit(2 * i) && (!anySolo || bit(2 * i + 1)) }
+        func linear(_ byte: UInt8) -> Double {
+            let dB = Int(Int8(bitPattern: byte))
+            return dB <= EnsembleMixer.off ? 0 : pow(10, Double(dB) / 20)
+        }
+        func coef(_ x: Double) -> UInt16 { UInt16(min((x * Double(Self.unity)).rounded(), 65535)) }
+        let outL = linear(b[48]), outR = linear(b[49])
+
+        for i in 0..<18 where audible(i) {
+            let pan = min(max(Double(Int8(bitPattern: b[28 + i])) / 64, -1), 1)
+            let angle = (pan + 1) * .pi / 4
+            let g = linear(b[5 + i]), src = EnsembleMixer.source(ofInput: i)
+            left[src] = coef(g * cos(angle) * outL)
+            right[src] = coef(g * sin(angle) * outR)
+        }
+        // Software return: channel numbers are FireWire playback channels (0 = playback 1).
+        if audible(18), b[1] < 18, b[2] < 18 {
+            left[8 + Int(b[1])] = coef(linear(b[46]) * outL)
+            right[8 + Int(b[2])] = coef(linear(b[47]) * outR)
+        }
+    }
 }
 
 /// Sample clock source, set with the standard AV/C SIGNAL SOURCE command (not

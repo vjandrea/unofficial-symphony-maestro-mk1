@@ -5,6 +5,8 @@
 ///
 ///   swift run --package-path Apps/Maestro EnsembleControl          # window
 ///   swift run --package-path Apps/Maestro EnsembleControl --probe  # read-only check
+///   swift run --package-path Apps/Maestro EnsembleControl --coefficients  # read-only mixer gain dump
+///   ENSEMBLE_COEFFICIENT_WRITES=1 lets the Mixer tab change the audio (off until the layout is checked).
 ///   ASFW_MCP_ENDPOINT=http://127.0.0.1:8765/mcp to override the endpoint.
 
 import AppKit
@@ -13,6 +15,33 @@ import MaestroDevice
 import SwiftUI
 
 let endpoint = URL(string: ProcessInfo.processInfo.environment["ASFW_MCP_ENDPOINT"] ?? "http://127.0.0.1:8765/mcp")!
+
+if CommandLine.arguments.contains("--coefficients") {
+    // Read-only: raw B6 replies, their decoding, and what the B7 model predicts.
+    let plane = ASFWControlPlane(endpoint: endpoint)
+    do {
+        let unit = try await plane.findUnit()
+        let models = try EnsembleMixer.parse(reply: try await plane.send(EnsembleProtocol.readMixers, to: unit))
+        for mixer in 0..<2 {
+            var unitGains = EnsembleCoefficients()
+            print("Mix \(mixer == 0 ? "A" : "B")")
+            for block in 0..<EnsembleCoefficients.blocks {
+                let reply = try await plane.send(EnsembleCoefficients.readFrame(mixer: mixer, block: block), to: unit)
+                print("  B6 \(mixer) \(block): " + reply.prefix(48).map { String(format: "%02X", $0) }.joined(separator: " "))
+                try? unitGains.absorb(reply: reply, block: block)
+            }
+            let predicted = EnsembleCoefficients(model: models[mixer])
+            for i in 0..<EnsembleCoefficients.sources
+            where unitGains.left[i] | unitGains.right[i] | predicted.left[i] | predicted.right[i] != 0 {
+                print("  source \(i): unit L \(unitGains.left[i]) R \(unitGains.right[i])   model L \(predicted.left[i]) R \(predicted.right[i])")
+            }
+        }
+        exit(0)
+    } catch {
+        print("coefficients failed: \(error)")
+        exit(1)
+    }
+}
 
 if CommandLine.arguments.contains("--probe") {
     let plane = ASFWControlPlane(endpoint: endpoint)
@@ -53,7 +82,9 @@ final class EnsembleModel {
         change(&m[index])
         mixers = m
         mixerEditedAt = .now
+        if Self.coefficientWrites { pending += EnsembleCoefficients(model: m[index]).writeFrames(mixer: index) }
     }
+    static let coefficientWrites = ProcessInfo.processInfo.environment["ENSEMBLE_COEFFICIENT_WRITES"] == "1"
     private var mixerEditedAt: ContinuousClock.Instant?
     private static let mixerWriteDelay = Duration.seconds(5)
 
@@ -373,6 +404,10 @@ struct MixerPage: View {
         VStack(alignment: .leading, spacing: 12) {
             Picker("", selection: $mix) { Text("Mix A").tag(0); Text("Mix B").tag(1) }
                 .pickerStyle(.segmented).labelsHidden().frame(width: 200)
+            if !EnsembleModel.coefficientWrites {
+                Text("Faders are saved to the unit but don't change the audio yet (ENSEMBLE_COEFFICIENT_WRITES=1 to enable).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             ScrollView(.horizontal) {
                 HStack(alignment: .bottom, spacing: 2) {
                     ForEach(0..<18, id: \.self) { i in
