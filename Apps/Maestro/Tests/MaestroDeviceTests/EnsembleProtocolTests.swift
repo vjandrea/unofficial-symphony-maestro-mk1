@@ -18,7 +18,8 @@ struct EnsembleProtocolTests {
         #expect(Array(try EnsembleProtocol.setMicGain(input: 0, dB: 39).prefix(9)) == Self.hex("00 FF 00 00 03 DB E6 00 27"))
         #expect(Array(EnsembleProtocol.setIdentify(true).prefix(9)) == Self.hex("00 FF 00 00 03 DB EB 08 01"))
         #expect(Array(EnsembleProtocol.setOutputLevel(.main, attenuationDB: 200).prefix(9)) == Self.hex("00 FF 00 00 03 DB F6 00 7F"))
-        #expect(Array(EnsembleProtocol.setOutputLevel(.headphone1, attenuationDB: 100).prefix(9)) == Self.hex("00 FF 00 00 03 DB F6 01 40"))
+        #expect(Array(EnsembleProtocol.setOutputLevel(.headphone1, attenuationDB: 100).prefix(9)) == Self.hex("00 FF 00 00 03 DB F6 01 64"))
+        #expect(Array(EnsembleProtocol.setOutputLevel(.headphone2, attenuationDB: 200).prefix(9)) == Self.hex("00 FF 00 00 03 DB F6 02 7F"))
     }
 
     @Test func referenceLevelAndMainModeFrames() throws {

@@ -71,7 +71,8 @@ public enum EnsembleProtocol {
         return frame(0xE4, [UInt8(input), on ? 1 : 0])
     }
 
-    /// Output levels are dB of attenuation: main 0...127, headphones 0...64 (63 and up mutes).
+    /// Output levels are dB of attenuation, 0...127 on main and both headphones; 127 is silent
+    /// (measured on hardware: HP1 still audible at 64, the HP knob goes down to 127).
     public static func setOutputLevel(_ output: EnsembleOutput, attenuationDB: Int) -> [UInt8] {
         frame(0xF6, [output.rawValue, UInt8(min(max(attenuationDB, 0), output.maxAttenuation))])
     }
@@ -117,7 +118,7 @@ public enum EnsembleProtocol {
 /// `F6` output index. HP1/HP2 come from `setOutLevel(bool, bool, int)`.
 public enum EnsembleOutput: UInt8, Sendable, CaseIterable {
     case main = 0, headphone1 = 1, headphone2 = 2
-    public var maxAttenuation: Int { self == .main ? 127 : 64 }
+    public var maxAttenuation: Int { 127 }
 }
 
 /// Device reference-level codes. Maestro's CoreAudio encoding is +4 dBu = 0,

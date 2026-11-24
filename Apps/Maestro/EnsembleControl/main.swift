@@ -266,10 +266,10 @@ struct LevelControl: View {
     var body: some View {
         VStack(spacing: 4) {
             VerticalFader(value: $level, range: -Double(output.maxAttenuation)...0, onEditingChanged: { editing = $0 }) {
-                model.send(EnsembleProtocol.setOutputLevel(output, attenuationDB: Int(-level)))
+                model.send(EnsembleProtocol.setOutputLevel(output, attenuationDB: Int(-level.rounded())))
             }
             .frame(width: 34, height: 140)
-            Text("\(Int(level)) dB").font(.caption2).monospacedDigit()
+            Text("\(Int(level.rounded())) dB").font(.caption2).monospacedDigit()
             Text(label).font(.caption2).lineLimit(1).fixedSize()
         }
         .onChange(of: attenuation) { _, new in if !editing, let new { level = Double(-min(new, output.maxAttenuation)) } }
