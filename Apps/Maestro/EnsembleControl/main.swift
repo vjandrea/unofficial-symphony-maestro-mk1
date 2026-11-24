@@ -373,9 +373,9 @@ struct MixerFader: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            VerticalFader(value: $dB, range: -97...0, onEditingChanged: { editing = $0 }) { commit(Int(dB)) }
+            VerticalFader(value: $dB, range: -97...0, onEditingChanged: { editing = $0 }) { commit(Int(dB.rounded())) }
                 .frame(width: 34, height: 140)
-            Text(dB <= -97 ? "-∞" : "\(Int(dB))").font(.caption2).monospacedDigit()
+            Text(dB.rounded() <= -97 ? "-∞" : "\(Int(dB.rounded()))").font(.caption2).monospacedDigit()
             Text(label).font(.caption2).lineLimit(1).fixedSize()
         }
         .onChange(of: value) { _, new in if !editing, let new { dB = Double(new) } }
